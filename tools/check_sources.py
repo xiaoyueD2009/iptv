@@ -197,7 +197,7 @@ def parse_m3u(filepath):
             if "group-title=" in line:
                 group_match = re.search(r'group-title="([^"]*)"', line)
                 current_group = group_match.group(1) if group_match else "未分组"
-            current_name = line.split(",")[-1].strip()
+            current_name = strip_latency_tag(line.split(",")[-1].strip())
         elif line.startswith("http") and current_name:
             channels[current_group].append((current_name, line))
             current_name = None
