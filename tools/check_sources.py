@@ -193,7 +193,7 @@ def parse_m3u(filepath):
                 current_group = group_match.group(1) if group_match else "未分组"
             current_name = line.split(",")[-1].strip()
         elif line.startswith("http") and current_name:
-            channels[current_group].append((current_name, url=line))
+            channels[current_group].append((current_name, line))
             current_name = None
 
     return channels
