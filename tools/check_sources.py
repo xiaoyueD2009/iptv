@@ -235,23 +235,40 @@ def check_all_sources(channels, max_workers=30, timeout=5):
     return results
 
 
-def dedup_and_sort(results):
+def protocol_score(url):
+    score = 0
+    if url.startswith("https://"):
+        score += 100
+    if ".m3u8" in url:
+        score += 50
+    return score
+
+
+def dedup_and_sort(results, top_n=3):
     grouped = defaultdict(list)
     for group, name, url, latency, isp in results:
         grouped[(group, name)].append((url, latency, isp))
 
     deduped = []
     for (group, name), sources in grouped.items():
-        sources.sort(key=lambda x: x[1])
-        best = sources[0]
-        deduped.append((group, name, best[0], best[1], best[2]))
+        sources.sort(key=lambda x: (x[1] - protocol_score(x[0]) / 100))
+        for url, latency, isp in sources[:top_n]:
+            deduped.append((group, name, url, latency, isp))
 
     grouped_final = defaultdict(list)
     for group, name, url, latency, isp in deduped:
         grouped_final[group].append((name, url, latency, isp))
 
     for group in grouped_final:
-        grouped_final[group].sort(key=lambda x: x[0])
+        channels = defaultdict(list)
+        for name, url, latency, isp in grouped_final[group]:
+            channels[name].append((url, latency, isp))
+        sorted_names = sorted(channels.keys(), key=lambda n: min(c[1] for c in channels[n]))
+        sorted_items = []
+        for name in sorted_names:
+            for url, latency, isp in channels[name]:
+                sorted_items.append((name, url, latency, isp))
+        grouped_final[group] = sorted_items
 
     return grouped_final
 
@@ -266,7 +283,8 @@ def write_txt(grouped_results, filepath):
             items = grouped_results[group]
             f.write(f"{group},#genre#\n")
             for name, url, latency, isp in items:
-                f.write(f"{name},{url}\n")
+                tag = f"[{int(latency)}ms|{isp}]" if latency < 500 else f"[{isp}]"
+                f.write(f"{name}{tag},{url}\n")
             f.write("\n")
 
     print(f"已写入: {filepath}")
@@ -280,7 +298,8 @@ def write_m3u(grouped_results, filepath, epg_url="http://epg.112114.xyz/pp.xml")
             items = grouped_results[group]
             for name, url, latency, isp in items:
                 logo = f"https://tb.zbds.top/logo/{name}.png"
-                f.write(f'#EXTINF:-1 group-title="{group}" tvg-name="{name}" tvg-logo="{logo}",{name}\n')
+                display = f"{name} [{int(latency)}ms]" if latency < 500 else name
+                f.write(f'#EXTINF:-1 group-title="{group}" tvg-name="{name}" tvg-logo="{logo}",{display}\n')
                 f.write(f"{url}\n")
 
     print(f"已写入: {filepath}")
@@ -293,6 +312,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=5, help="超时秒数 (默认: 5)")
     parser.add_argument("--output-dir", default=None, help="输出目录 (默认: 输入文件所在目录)")
     parser.add_argument("--min-sources", type=int, default=1, help="每个频道最少保留源数 (默认: 1)")
+    parser.add_argument("--top-n", type=int, default=3, help="每个频道最多保留源数 (默认: 3)")
     args = parser.parse_args()
 
     for input_file in args.input:
@@ -314,7 +334,7 @@ def main():
         print(f"读取到 {len(channels)} 个分组，{total_channels} 个频道条目")
 
         results = check_all_sources(channels, args.workers, args.timeout)
-        grouped = dedup_and_sort(results)
+        grouped = dedup_and_sort(results, top_n=args.top_n)
 
         alive_channels = sum(len(v) for v in grouped.values())
         print(f"\n存活频道: {alive_channels} / {total_channels}")
