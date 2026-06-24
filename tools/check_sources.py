@@ -4,7 +4,9 @@ IPTV 源健康检测工具
 - 并发检测源存活状态
 - 按响应速度排序
 - 标记运营商（移动/联通/电信/广电/公网）
-- 去重（同一频道保留最快源）
+- 国外源检测与标记（ip-api.com）
+- 国内源优先排序
+- 去重（同一频道保留最快 Top N 源）
 - 输出干净的 txt 和 m3u 文件
 """
 
@@ -12,6 +14,7 @@ import os
 import re
 import sys
 import time
+import json
 import socket
 import struct
 import argparse
@@ -59,7 +62,6 @@ ISP_IP_RANGES = {
         ("222.160.0.0", "222.191.255.255"),
         ("182.112.0.0", "182.191.255.255"),
         ("61.128.0.0", "61.191.255.255"),
-        ("123.128.0.0", "123.191.255.255"),
     ],
     "广电": [
         ("172.16.0.0", "172.31.255.255"),
@@ -96,6 +98,65 @@ def detect_isp(url):
         return "公网"
     except Exception:
         return "未知"
+
+
+_country_cache = {}
+
+
+def batch_detect_countries(hosts):
+    unique_ips = {}
+    for h in hosts:
+        if h in _country_cache:
+            continue
+        try:
+            ip = socket.gethostbyname(h)
+            unique_ips[h] = ip
+        except Exception:
+            _country_cache[h] = ("未知", None)
+
+    ip_to_hosts = defaultdict(list)
+    for h, ip in unique_ips.items():
+        ip_to_hosts[ip].append(h)
+
+    unique_ip_list = list(ip_to_hosts.keys())
+
+    for i in range(0, len(unique_ip_list), 100):
+        batch = unique_ip_list[i:i + 100]
+        try:
+            if HAS_REQUESTS:
+                resp = requests.post(
+                    "http://ip-api.com/batch?fields=query,countryCode,country",
+                    json=batch, timeout=10
+                )
+                results = resp.json()
+            else:
+                data = json.dumps(batch).encode()
+                req = urllib.request.Request(
+                    "http://ip-api.com/batch?fields=query,countryCode,country",
+                    data=data,
+                    headers={"Content-Type": "application/json"}
+                )
+                results = json.loads(urllib.request.urlopen(req, timeout=10).read())
+
+            for r in results:
+                ip = r.get("query", "")
+                cc = r.get("countryCode", "")
+                cn = r.get("country", "")
+                for h in ip_to_hosts.get(ip, []):
+                    _country_cache[h] = (cn or "未知", cc or "")
+        except Exception as e:
+            print(f"  国家检测批次失败: {e}")
+            for ip in batch:
+                for h in ip_to_hosts.get(ip, []):
+                    _country_cache[h] = ("未知", "")
+        if i + 100 < len(unique_ip_list):
+            time.sleep(1.2)
+
+    return {h: _country_cache.get(h, ("未知", "")) for h in hosts}
+
+
+def is_domestic(country_code):
+    return country_code in ("CN", "", None)
 
 
 def check_source(url, timeout=5):
@@ -238,7 +299,28 @@ def check_all_sources(channels, max_workers=30, timeout=5):
                 results.append((group, name, url, latency, isp))
 
     print(f"检测完成: {len(results)}/{total} 个源存活")
-    return results
+
+    all_hosts = set()
+    for _, _, url, _, _ in results:
+        host = urlparse(url).hostname
+        if host:
+            all_hosts.add(host)
+
+    print(f"检测源所在国家（{len(all_hosts)} 个域名）...")
+    country_map = batch_detect_countries(all_hosts)
+
+    results_with_country = []
+    foreign_count = 0
+    for group, name, url, latency, isp in results:
+        host = urlparse(url).hostname
+        country_name, country_code = country_map.get(host, ("未知", ""))
+        domestic = is_domestic(country_code)
+        if not domestic:
+            foreign_count += 1
+        results_with_country.append((group, name, url, latency, isp, country_name, country_code, domestic))
+
+    print(f"其中国内源: {len(results_with_country) - foreign_count}, 国外源: {foreign_count}")
+    return results_with_country
 
 
 def protocol_score(url):
@@ -252,31 +334,53 @@ def protocol_score(url):
 
 def dedup_and_sort(results, top_n=3):
     grouped = defaultdict(list)
-    for group, name, url, latency, isp in results:
-        grouped[(group, name)].append((url, latency, isp))
+    for group, name, url, latency, isp, country_name, country_code, domestic in results:
+        grouped[(group, name)].append((url, latency, isp, country_name, country_code, domestic))
 
     deduped = []
     for (group, name), sources in grouped.items():
-        sources.sort(key=lambda x: (x[1] - protocol_score(x[0]) / 100))
-        for url, latency, isp in sources[:top_n]:
-            deduped.append((group, name, url, latency, isp))
+        def sort_key(x):
+            dom_bonus = 0 if x[5] else 5000
+            return x[1] - protocol_score(x[0]) / 100 + dom_bonus
+
+        sources.sort(key=sort_key)
+        for url, latency, isp, cn, cc, dom in sources[:top_n]:
+            deduped.append((group, name, url, latency, isp, cn, cc, dom))
 
     grouped_final = defaultdict(list)
-    for group, name, url, latency, isp in deduped:
-        grouped_final[group].append((name, url, latency, isp))
+    for group, name, url, latency, isp, cn, cc, dom in deduped:
+        grouped_final[group].append((name, url, latency, isp, cn, cc, dom))
 
     for group in grouped_final:
         channels = defaultdict(list)
-        for name, url, latency, isp in grouped_final[group]:
-            channels[name].append((url, latency, isp))
-        sorted_names = sorted(channels.keys(), key=lambda n: min(c[1] for c in channels[n]))
+        for name, url, latency, isp, cn, cc, dom in grouped_final[group]:
+            channels[name].append((url, latency, isp, cn, cc, dom))
+        sorted_names = sorted(channels.keys(), key=lambda n: min(
+            c[1] + (0 if c[5] else 5000) for c in channels[n]
+        ))
         sorted_items = []
         for name in sorted_names:
-            for url, latency, isp in channels[name]:
-                sorted_items.append((name, url, latency, isp))
+            for url, latency, isp, cn, cc, dom in channels[name]:
+                sorted_items.append((name, url, latency, isp, cn, cc, dom))
         grouped_final[group] = sorted_items
 
     return grouped_final
+
+
+def format_tag(latency, isp, country_name, country_code, domestic):
+    if domestic:
+        if latency < 500:
+            return f"[{int(latency)}ms|{isp}]"
+        return f"[{isp}]"
+    short = {"United States": "美", "Canada": "加", "Germany": "德",
+             "South Korea": "韩", "France": "法", "Singapore": "新加坡",
+             "United Kingdom": "英", "Taiwan": "台", "Japan": "日",
+             "Hong Kong": "港", "Netherlands": "荷", "Russia": "俄",
+             "British Virgin Islands": "BVI", "Australia": "澳",
+             "India": "印", "Brazil": "巴", "Vietnam": "越",
+             "Thailand": "泰", "Malaysia": "马来", "Indonesia": "印尼"}
+    label = short.get(country_name, country_name[:4] if country_name else "外")
+    return f"[{label}]"
 
 
 def write_txt(grouped_results, filepath):
@@ -288,8 +392,8 @@ def write_txt(grouped_results, filepath):
         for group in sorted(grouped_results.keys()):
             items = grouped_results[group]
             f.write(f"{group},#genre#\n")
-            for name, url, latency, isp in items:
-                tag = f"[{int(latency)}ms|{isp}]" if latency < 500 else f"[{isp}]"
+            for name, url, latency, isp, cn, cc, dom in items:
+                tag = format_tag(latency, isp, cn, cc, dom)
                 f.write(f"{name}{tag},{url}\n")
             f.write("\n")
 
@@ -302,9 +406,12 @@ def write_m3u(grouped_results, filepath, epg_url="http://epg.112114.xyz/pp.xml")
 
         for group in sorted(grouped_results.keys()):
             items = grouped_results[group]
-            for name, url, latency, isp in items:
+            for name, url, latency, isp, cn, cc, dom in items:
                 logo = f"https://tb.zbds.top/logo/{name}.png"
-                display = f"{name} [{int(latency)}ms]" if latency < 500 else name
+                tag = format_tag(latency, isp, cn, cc, dom)
+                display = f"{name}{tag}" if dom else f"{name}{tag}"
+                if dom and latency < 500:
+                    display = f"{name} [{int(latency)}ms]"
                 f.write(f'#EXTINF:-1 group-title="{group}" tvg-name="{name}" tvg-logo="{logo}",{display}\n')
                 f.write(f"{url}\n")
 
@@ -317,7 +424,6 @@ def main():
     parser.add_argument("--workers", type=int, default=30, help="并发线程数 (默认: 30)")
     parser.add_argument("--timeout", type=int, default=5, help="超时秒数 (默认: 5)")
     parser.add_argument("--output-dir", default=None, help="输出目录 (默认: 输入文件所在目录)")
-    parser.add_argument("--min-sources", type=int, default=1, help="每个频道最少保留源数 (默认: 1)")
     parser.add_argument("--top-n", type=int, default=3, help="每个频道最多保留源数 (默认: 3)")
     args = parser.parse_args()
 
@@ -343,7 +449,9 @@ def main():
         grouped = dedup_and_sort(results, top_n=args.top_n)
 
         alive_channels = sum(len(v) for v in grouped.values())
-        print(f"\n存活频道: {alive_channels} / {total_channels}")
+        domestic_count = sum(1 for items in grouped.values() for _, _, _, _, _, _, dom in items if dom)
+        foreign_count = alive_channels - domestic_count
+        print(f"\n存活频道: {alive_channels} / {total_channels} (国内: {domestic_count}, 国外: {foreign_count})")
 
         output_dir = args.output_dir or os.path.dirname(input_file) or "."
         base_name = os.path.splitext(os.path.basename(input_file))[0]
