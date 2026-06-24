@@ -35,41 +35,37 @@ jobs:
         cp -f tv/iptv6.m3u backup/iptv6.m3u 2>/dev/null || true
 
     - name: Check IPTV4 sources
-      run: |
-        python tools/check_sources.py tv/iptv4.txt tv/iptv4.m3u           --workers 30 --timeout 5
+      run: python tools/check_sources.py tv/iptv4.txt tv/iptv4.m3u --workers 30 --timeout 5
       continue-on-error: true
 
     - name: Check IPTV6 sources
-      run: |
-        python tools/check_sources.py tv/iptv6.txt tv/iptv6.m3u           --workers 30 --timeout 5
+      run: python tools/check_sources.py tv/iptv6.txt tv/iptv6.m3u --workers 30 --timeout 5
       continue-on-error: true
 
     - name: Generate diff summary
-      id: diff
+      if: always()
       run: |
         echo "## IPTV 源检测报告" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-
         for f in tv/iptv4.txt tv/iptv6.txt; do
-          if [ -f "$f" ] && [ -f "backup/$(basename $f)" ]; then
-            old=$(grep -c "http" "backup/$(basename $f)" 2>/dev/null || echo "0")
-            new=$(grep -c "http" "$f" 2>/dev/null || echo "0")
-            echo "### $(basename $f)" >> $GITHUB_STEP_SUMMARY
-            echo "- 原始源数: $old" >> $GITHUB_STEP_SUMMARY
-            echo "- 存活源数: $new" >> $GITHUB_STEP_SUMMARY
-            if [ "$old" -gt 0 ]; then
-              rate=$(awk "BEGIN{printf "%.1f", ($new/$old)*100}")
-              echo "- 存活率: ${rate}%" >> $GITHUB_STEP_SUMMARY
-            fi
-            echo "" >> $GITHUB_STEP_SUMMARY
+          base=$(basename "$f")
+          old=$(grep -c "http" "backup/$base" 2>/dev/null || echo "0")
+          new_count=$(grep -c "http" "$f" 2>/dev/null || echo "0")
+          echo "### $base" >> $GITHUB_STEP_SUMMARY
+          echo "- 原始源数: $old" >> $GITHUB_STEP_SUMMARY
+          echo "- 存活源数: $new_count" >> $GITHUB_STEP_SUMMARY
+          if [ "$old" -gt 0 ]; then
+            rate=$(awk "BEGIN{printf "%.1f", ($new_count/$old)*100}")
+            echo "- 存活率: ${rate}%" >> $GITHUB_STEP_SUMMARY
           fi
+          echo "" >> $GITHUB_STEP_SUMMARY
         done
 
     - name: Commit changes
+      if: always()
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-
         git add tv/
         if git diff --cached --quiet; then
           echo "无变更，跳过提交"
