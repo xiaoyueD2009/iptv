@@ -24,10 +24,12 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     
     steps:
     - name: Checkout current repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
         fetch-depth: 0
