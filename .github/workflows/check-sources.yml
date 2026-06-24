@@ -29,10 +29,9 @@ jobs:
     - name: Backup original files
       run: |
         mkdir -p backup
-        cp -f tv/iptv4.txt backup/iptv4.txt 2>/dev/null || true
-        cp -f tv/iptv4.m3u backup/iptv4.m3u 2>/dev/null || true
-        cp -f tv/iptv6.txt backup/iptv6.txt 2>/dev/null || true
-        cp -f tv/iptv6.m3u backup/iptv6.m3u 2>/dev/null || true
+        for f in tv/iptv4.txt tv/iptv4.m3u tv/iptv6.txt tv/iptv6.m3u; do
+          [ -f "$f" ] && cp -f "$f" "backup/$(basename $f)"
+        done
 
     - name: Check IPTV4 sources
       run: python tools/check_sources.py tv/iptv4.txt tv/iptv4.m3u --workers 30 --timeout 5
@@ -45,21 +44,32 @@ jobs:
     - name: Generate diff summary
       if: always()
       run: |
-        echo "## IPTV 源检测报告" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        for f in tv/iptv4.txt tv/iptv6.txt; do
-          base=$(basename "$f")
-          old=$(grep -c "http" "backup/$base" 2>/dev/null || echo "0")
-          new_count=$(grep -c "http" "$f" 2>/dev/null || echo "0")
-          echo "### $base" >> $GITHUB_STEP_SUMMARY
-          echo "- 原始源数: $old" >> $GITHUB_STEP_SUMMARY
-          echo "- 存活源数: $new_count" >> $GITHUB_STEP_SUMMARY
-          if [ "$old" -gt 0 ]; then
-            rate=$(awk "BEGIN{printf "%.1f", ($new_count/$old)*100}")
-            echo "- 存活率: ${rate}%" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "" >> $GITHUB_STEP_SUMMARY
-        done
+        {
+          echo "## IPTV 源检测报告"
+          echo ""
+          for f in tv/iptv4.txt tv/iptv6.txt; do
+            base=$(basename "$f")
+            backup_file="backup/$base"
+            if [ -f "$backup_file" ]; then
+              old_count=$(grep -c "http" "$backup_file" || true)
+            else
+              old_count=0
+            fi
+            if [ -f "$f" ]; then
+              new_count=$(grep -c "http" "$f" || true)
+            else
+              new_count=0
+            fi
+            echo "### $base"
+            echo "- 原始源数: $old_count"
+            echo "- 存活源数: $new_count"
+            if [ "$old_count" -gt 0 ] 2>/dev/null; then
+              rate=$(awk "BEGIN{printf \"%.1f\", ($new_count/$old_count)*100}")
+              echo "- 存活率: ${rate}%"
+            fi
+            echo ""
+          done
+        } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Commit changes
       if: always()
