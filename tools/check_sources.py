@@ -215,9 +215,20 @@ def check_source_m3u8(url, timeout=8):
 
 
 def strip_latency_tag(name):
-    name = re.sub(r'\s*\[\d+ms(?:\|[^\]]+)?\]', '', name)
-    name = re.sub(r'\s*\[(?:移动|联通|电信|公网|广电|内网|未知)\]', '', name)
-    name = re.sub(r'\s*\[[A-Za-z\u4e00-\u9fff]{1,8}\]', '', name)
+    for _ in range(5):
+        new_name = re.sub(r'\s*\[\d+ms(?:\|[^\]]+)?\]\s*$', '', name)
+        if new_name != name:
+            name = new_name
+            continue
+        new_name = re.sub(r'\s*\[(?:移动|联通|电信|公网|广电|内网|未知)\]\s*$', '', name)
+        if new_name != name:
+            name = new_name
+            continue
+        new_name = re.sub(r'\s*\[(?:美|加|德|韩|法|英|台|新加坡|BVI|日|港|荷|俄|澳|印|巴|越|泰|马来|印尼|墨西哥)\]\s*$', '', name)
+        if new_name != name:
+            name = new_name
+            continue
+        break
     return name.strip()
 
 
