@@ -153,6 +153,12 @@ def check_source_m3u8(url, timeout=8):
         return None
 
 
+def strip_latency_tag(name):
+    name = re.sub(r'\s*\[\d+ms(?:\|[^\]]+)?\]\s*', '', name)
+    name = re.sub(r'\s*\[(?:移动|联通|电信|公网|广电|内网|未知)\]\s*', '', name)
+    return name.strip()
+
+
 def parse_txt(filepath):
     channels = defaultdict(list)
     current_group = "未分组"
@@ -167,7 +173,7 @@ def parse_txt(filepath):
                 continue
             if "," in line:
                 parts = line.split(",", 1)
-                name = parts[0].strip()
+                name = strip_latency_tag(parts[0].strip())
                 url = parts[1].strip()
                 if url.startswith("http"):
                     channels[current_group].append((name, url))
