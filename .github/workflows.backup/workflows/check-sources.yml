@@ -1,0 +1,85 @@
+name: Check and Clean IPTV Sources
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * *'
+
+jobs:
+  check-sources:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: pip install requests
+
+    - name: Backup original files
+      run: |
+        mkdir -p backup
+        for f in tv/iptv4.txt tv/iptv4.m3u tv/iptv6.txt tv/iptv6.m3u; do
+          [ -f "$f" ] && cp -f "$f" "backup/$(basename $f)"
+        done
+
+    - name: Check IPTV4 sources
+      run: python tools/check_sources.py tv/iptv4.txt tv/iptv4.m3u --workers 30 --timeout 5
+      continue-on-error: true
+
+    - name: Check IPTV6 sources
+      run: python tools/check_sources.py tv/iptv6.txt tv/iptv6.m3u --workers 30 --timeout 5
+      continue-on-error: true
+
+    - name: Generate diff summary
+      if: always()
+      run: |
+        {
+          echo "## IPTV 源检测报告"
+          echo ""
+          for f in tv/iptv4.txt tv/iptv6.txt; do
+            base=$(basename "$f")
+            backup_file="backup/$base"
+            if [ -f "$backup_file" ]; then
+              old_count=$(grep -c "http" "$backup_file" || true)
+            else
+              old_count=0
+            fi
+            if [ -f "$f" ]; then
+              new_count=$(grep -c "http" "$f" || true)
+            else
+              new_count=0
+            fi
+            echo "### $base"
+            echo "- 原始源数: $old_count"
+            echo "- 存活源数: $new_count"
+            if [ "$old_count" -gt 0 ] 2>/dev/null; then
+              rate=$(awk "BEGIN{printf \"%.1f\", ($new_count/$old_count)*100}")
+              echo "- 存活率: ${rate}%"
+            fi
+            echo ""
+          done
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Commit changes
+      if: always()
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add tv/
+        if git diff --cached --quiet; then
+          echo "无变更，跳过提交"
+        else
+          git commit -m "chore: 自动清理失效源 [skip ci] $(date +%Y-%m-%d)"
+          git push
+        fi
